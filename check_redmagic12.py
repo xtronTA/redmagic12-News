@@ -167,6 +167,62 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def send_email(source: str, title: str, link: str) -> None:
+    user = os.environ.get("GMAIL_USER")
+    pwd = os.environ.get("GMAIL_APP_PASSWORD")
+    to = os.environ.get("EMAIL_TO", user)
+    if not user or not pwd:
+        print("Aviso: GMAIL_USER/GMAIL_APP_PASSWORD no configurados, se omite correo.")
+        return
+    msg = MIMEText(f"Fuente: {source}\n\n{title}\n\n{link}")
+    msg["Subject"] = f"🚨 [{source}] Noticia sobre RedMagic 12"
+    msg["From"] = user
+    msg["To"] = to
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(user, pwd)
+        server.sendmail(user, [to], msg.as_string())
+
+
+def main() -> None:
+    first_run = not os.path.exists(SEEN_FILE)
+    seen = load_seen()
+
+    items = []
+    items += fetch_news()
+    items += fetch_reddit()
+    items += fetch_youtube()
+
+    if first_run:
+        # Primera ejecución: solo guardamos el estado actual para no
+        # notificar cosas viejas que ya existían antes de activar esto.
+        save_seen({link for _, _, link in items})
+        print(f"Primera ejecución: {len(items)} resultados guardados como estado inicial. No se notifica.")
+        return
+
+    new_items = [(s, t, l) for s, t, l in items if l not in seen]
+
+    if not new_items:
+        print("Sin novedades sobre el RedMagic 12.")
+        return
+
+    for source, title, link in new_items:
+        print(f"[{source}] Nuevo: {title}")
+        try:
+            send_discord(source, title, link)
+        except Exception as e:
+            print(f"Error enviando a Discord: {e}")
+        try:
+            send_email(source, title, link)
+        except Exception as e:
+            print(f"Error enviando correo: {e}")
+        seen.add(link)
+
+    save_seen(seen)
+
+
+if __name__ == "__main__":
+    main()
     
 if __name__ == "__main__":
     main()
