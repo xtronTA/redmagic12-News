@@ -29,6 +29,7 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python check_redmagic12.py
 
       - name: Guardar estado (seen.json) en el repo
@@ -38,4 +39,3 @@ jobs:
           git add seen.json
           git diff --staged --quiet || git commit -m "Actualizar estado de noticias vistas"
           git push
-
