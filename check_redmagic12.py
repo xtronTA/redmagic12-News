@@ -1,4 +1,4 @@
-""""""
+"""
 Vigilante de anuncio del RedMagic 12.
 Revisa Google News, Reddit y YouTube buscando "RedMagic 12" / "Red Magic 12"
 y avisa por Discord (webhook) y correo (Gmail) cuando aparece algo nuevo.
@@ -167,3 +167,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
