@@ -1,14 +1,29 @@
 """
 Vigilante de anuncio del RedMagic 12.
-Revisa Google News, Reddit y YouTube buscando "RedMagic 12" / "Red Magic 12"
-y avisa por Discord (webhook) y correo (Gmail) cuando aparece algo nuevo.
+
+Fuentes:
+- Google News (prensa)
+- Reddit (búsqueda general)
+- Twitter/X oficial @redmagicgaming (vía Nitter, best-effort/inestable)
+- Canal oficial de YouTube de REDMAGIC (vía RSS, sin API key)
+- Página oficial redmagic.gg (best-effort)
+
+Cada fuente está protegida individualmente: si una falla, las demás siguen
+funcionando y el script no se cae completo (esto es lo que arregla los
+crashes que tenías antes).
 
 Guarda el estado (lo ya visto) en seen.json, que se commitea de vuelta
 al repo desde el workflow de GitHub Actions, así no se repiten avisos.
+
+Nota sobre Instagram: no existe forma gratuita ni confiable de vigilar
+posts de una cuenta sin iniciar sesión o pagar la API oficial de Meta.
+Para eso, lo más confiable es activar la campanita de notificaciones en
+la app de Instagram para @redmagicgaming directamente.
 """
 
 import os
 import json
+import re
 import smtplib
 import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
@@ -17,12 +32,26 @@ from urllib.parse import quote
 import requests
 
 SEEN_FILE = "seen.json"
-HEADERS = {"User-Agent": "redmagic12-watcher/1.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (redmagic12-watcher/1.0)"}
+KEYWORDS = ("redmagic 12", "red magic 12")
 
 QUERY = '"RedMagic 12" OR "Red Magic 12"'
 NEWS_RSS_URL = f"https://news.google.com/rss/search?q={quote(QUERY)}&hl=es-419&gl=MX&ceid=MX:es"
 REDDIT_URL = f"https://www.reddit.com/search.json?q={quote('RedMagic 12')}&sort=new&limit=10"
-YOUTUBE_URL = "https://www.googleapis.com/youtube/v3/search"
+
+# Canal oficial verificado de REDMAGIC en YouTube
+YOUTUBE_CHANNEL_ID = "UCqX5t6irpHLRUBqf_0hKAvg"
+YOUTUBE_RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={YOUTUBE_CHANNEL_ID}"
+
+OFFICIAL_SITE_URL = "https://www.redmagic.gg/en/us/news"
+
+# Cuenta oficial en Twitter/X: @redmagicgaming, vía Nitter (espejo no
+# oficial e inestable). Si todas las instancias fallan, se omite esta
+# fuente sin romper el script.
+NITTER_INSTANCES = [
+    "https://nitter.net/redmagicgaming/rss",
+    "https://nitter.privacydev.net/redmagicgaming/rss",
+]
 
 
 def load_seen() -> set:
@@ -37,8 +66,12 @@ def save_seen(seen: set) -> None:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
 
 
+def mentions_redmagic12(text: str) -> bool:
+    t = text.lower()
+    return any(k in t for k in KEYWORDS)
+
+
 def fetch_news() -> list[tuple[str, str, str]]:
-    """Devuelve lista de (fuente, titulo, link)"""
     resp = requests.get(NEWS_RSS_URL, timeout=20, headers=HEADERS)
     resp.raise_for_status()
     root = ET.fromstring(resp.content)
@@ -53,13 +86,9 @@ def fetch_news() -> list[tuple[str, str, str]]:
 
 
 def fetch_reddit() -> list[tuple[str, str, str]]:
-    try:
-        resp = requests.get(REDDIT_URL, timeout=20, headers=HEADERS)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"Error consultando Reddit: {e}")
-        return []
+    resp = requests.get(REDDIT_URL, timeout=20, headers=HEADERS)
+    resp.raise_for_status()
+    data = resp.json()
     items = []
     for child in data.get("data", {}).get("children", []):
         post = child.get("data", {})
@@ -72,34 +101,59 @@ def fetch_reddit() -> list[tuple[str, str, str]]:
     return items
 
 
-def fetch_youtube() -> list[tuple[str, str, str]]:
-    api_key = os.environ.get("YOUTUBE_API_KEY")
-    if not api_key:
-        return []  # sin API key, se omite esta fuente
-    params = {
-        "part": "snippet",
-        "q": "RedMagic 12",
-        "type": "video",
-        "order": "date",
-        "maxResults": 10,
-        "key": api_key,
-    }
-    try:
-        resp = requests.get(YOUTUBE_URL, params=params, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"Error consultando YouTube: {e}")
-        return []
+def fetch_youtube_official() -> list[tuple[str, str, str]]:
+    """Solo videos del canal oficial verificado de REDMAGIC."""
+    resp = requests.get(YOUTUBE_RSS_URL, timeout=20, headers=HEADERS)
+    resp.raise_for_status()
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    root = ET.fromstring(resp.content)
     items = []
-    for item in data.get("items", []):
-        video_id = item.get("id", {}).get("videoId")
-        title = item.get("snippet", {}).get("title", "")
-        if not video_id:
+    for entry in root.findall("atom:entry", ns):
+        title_el = entry.find("atom:title", ns)
+        link_el = entry.find("atom:link", ns)
+        if title_el is None or link_el is None:
             continue
-        link = f"https://www.youtube.com/watch?v={video_id}"
-        items.append(("YouTube", title, link))
+        title = title_el.text or ""
+        link = link_el.get("href", "")
+        if mentions_redmagic12(title) and link:
+            items.append(("YouTube oficial REDMAGIC", title, link))
     return items
+
+
+def fetch_official_site() -> list[tuple[str, str, str]]:
+    """Best-effort: busca menciones de RedMagic 12 en la página oficial."""
+    resp = requests.get(OFFICIAL_SITE_URL, timeout=20, headers=HEADERS)
+    resp.raise_for_status()
+    html = resp.text
+    items = []
+    for match in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{0,200})</a>', html, re.IGNORECASE):
+        href, text = match.group(1), match.group(2)
+        if mentions_redmagic12(text):
+            link = href if href.startswith("http") else f"https://www.redmagic.gg{href}"
+            items.append(("Página oficial REDMAGIC", text.strip(), link))
+    return items
+
+
+def fetch_twitter_official() -> list[tuple[str, str, str]]:
+    """Best-effort vía Nitter (espejo no oficial e inestable de Twitter/X)."""
+    for base_url in NITTER_INSTANCES:
+        try:
+            resp = requests.get(base_url, timeout=15, headers=HEADERS)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            items = []
+            for item in root.findall(".//item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                if title_el is None or link_el is None:
+                    continue
+                title = title_el.text or ""
+                if mentions_redmagic12(title):
+                    items.append(("Twitter/X oficial REDMAGIC", title, link_el.text or ""))
+            return items  # si una instancia funcionó, no probamos las demás
+        except Exception:
+            continue  # prueba la siguiente instancia
+    return []  # todas las instancias fallaron, se omite esta fuente
 
 
 def send_discord(source: str, title: str, link: str) -> None:
@@ -128,14 +182,26 @@ def send_email(source: str, title: str, link: str) -> None:
         server.sendmail(user, [to], msg.as_string())
 
 
+def safe_fetch(name: str, fn) -> list[tuple[str, str, str]]:
+    """Ejecuta una función de fetch protegida: si falla, avisa y sigue
+    en vez de tumbar todo el script."""
+    try:
+        return fn()
+    except Exception as e:
+        print(f"Error consultando {name}: {e}")
+        return []
+
+
 def main() -> None:
     first_run = not os.path.exists(SEEN_FILE)
     seen = load_seen()
 
     items = []
-    items += fetch_news()
-    items += fetch_reddit()
-    items += fetch_youtube()
+    items += safe_fetch("Google News", fetch_news)
+    items += safe_fetch("Reddit", fetch_reddit)
+    items += safe_fetch("YouTube oficial", fetch_youtube_official)
+    items += safe_fetch("Página oficial", fetch_official_site)
+    items += safe_fetch("Twitter/X oficial", fetch_twitter_official)
 
     if first_run:
         # Primera ejecución: solo guardamos el estado actual para no
@@ -167,4 +233,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
